@@ -299,20 +299,26 @@ abstract class ScalaMojoSupport extends AbstractMojo {
     }
 
     protected void addToClasspath(String groupId, String artifactId, String version, Set<String> classpath) throws Exception {
-        addToClasspath(groupId, artifactId, version, classpath, true);
+        addToClasspath(groupId, artifactId, version, classpath, classpath);
     }
 
-
-    protected void addToClasspath(String groupId, String artifactId, String version, Set<String> classpath, boolean addDependencies) throws Exception {
-        addToClasspath(factory.createArtifact(groupId, artifactId, version, Artifact.SCOPE_RUNTIME, "jar"), classpath, addDependencies);
+    protected void addToClasspath(String groupId, String artifactId, String version, Set<String> classpath, Set<String> dependencies) throws Exception {
+        addToClasspath(factory.createArtifact(groupId, artifactId, version, Artifact.SCOPE_RUNTIME, "jar"), classpath, dependencies);
     }
 
-    protected void addToClasspath(Artifact artifact, Set<String> classpath, boolean addDependencies) throws Exception {
+    /**
+     * @param dependencies
+     *            set to add all dependencies to. pass $classpath$ to add both
+     *            to the same set, or null to not add dependencies.
+     */
+    protected void addToClasspath(Artifact artifact, Set<String> classpath,
+            Set<String> dependencies) throws Exception
+    {
         resolver.resolve(artifact, remoteRepos, localRepo);
         classpath.add(artifact.getFile().getCanonicalPath());
-        if (addDependencies) {
+        if (dependencies != null) {
             for (Artifact dep : resolveArtifactDependencies(artifact)) {
-                classpath.add(dep.getFile().getCanonicalPath());
+                dependencies.add(dep.getFile().getCanonicalPath());
             }
         }
     }
@@ -437,33 +443,41 @@ abstract class ScalaMojoSupport extends AbstractMojo {
 
 
     protected JavaMainCaller getScalaCommand() throws Exception {
-        JavaMainCaller cmd = getEmptyScalaCommand(scalaClassName);
+        ScalaPluginInfo plugin_info = getCompilerPluginInfo();
+        JavaMainCaller cmd = getEmptyScalaCommand(scalaClassName, plugin_info);
         cmd.addArgs(args);
-        addCompilerPluginOptions(cmd);
+        plugin_info.addToCall(cmd);
         cmd.addJvmArgs(jvmArgs);
         return cmd;
     }
 
-    protected JavaMainCaller getEmptyScalaCommand(String mainClass) throws Exception {
-        //TODO - Fork or not depending on configuration?
+    protected JavaMainCaller getEmptyScalaCommand(String mainClass)
+            throws Exception
+    {
+        return getEmptyScalaCommand(mainClass, new ScalaPluginInfo());
+    }
+
+    protected JavaMainCaller getEmptyScalaCommand(String mainClass, ScalaPluginInfo plugin_info) throws Exception {
+    	//TODO - Fork or not depending on configuration?
         JavaMainCaller cmd;
+        String java_classpath = getToolClasspath(plugin_info);
         if(fork) {
            if( new VersionNumber(scalaVersion).compareTo(new VersionNumber("2.8.0")) >= 0) {
                //TODO - Version 2.8.0 and above support passing arguments in a file via the @ argument.
                getLog().info("use scala command with args in file");
-               cmd = new ScalaCommandWIthArgsInFile(this, mainClass, getToolClasspath(), null, null);
+               cmd = new ScalaCommandWIthArgsInFile(this, mainClass, java_classpath, null, null);
            } else {
                getLog().info("use java command with args in file forced : " + forceUseArgFile);
-               cmd = new JavaCommand(this, mainClass, getToolClasspath(), null, null, forceUseArgFile);
+               cmd = new JavaCommand(this, mainClass, java_classpath, null, null, forceUseArgFile);
            }
         } else  {
-            cmd = new ReflectionJavaMainCaller(this, mainClass, getToolClasspath(), null, null);
+            cmd = new ReflectionJavaMainCaller(this, mainClass, java_classpath, null, null);
         }
         cmd.addJvmArgs("-Xbootclasspath/a:"+ getBootClasspath());
         return cmd;
     }
 
-    private String getToolClasspath() throws Exception {
+    private String getToolClasspath(ScalaPluginInfo plugin_info) throws Exception {
         Set<String> classpath = new HashSet<String>();
         addToClasspath(SCALA_GROUPID, "scala-compiler", scalaVersion, classpath);
 //        addToClasspath(SCALA_GROUPID, "scala-decoder", scalaVersion, classpath);
@@ -473,6 +487,7 @@ abstract class ScalaMojoSupport extends AbstractMojo {
                 addToClasspath(artifact.groupId, artifact.artifactId, artifact.version, classpath);
             }
         }
+        classpath.addAll(plugin_info.dependency_jars);
         return JavaCommand.toMultiPath(classpath.toArray(new String[classpath.size()]));
     }
 
@@ -486,47 +501,28 @@ abstract class ScalaMojoSupport extends AbstractMojo {
      * @return
      *           This returns whether or not the scala version can support having java sent into the compiler
      */
-    protected boolean isJavaSupportedByCompiler() {
-        return new VersionNumber(scalaVersion).compareTo(new VersionNumber("2.7.2")) >= 0;
-    }
+	protected boolean isJavaSupportedByCompiler() {
+		return new VersionNumber(scalaVersion).compareTo(new VersionNumber("2.7.2")) >= 0;
+	}
 
-
-    /**
-     * Adds appropriate compiler plugins to the scalac command.
-     * @param scalac
-     * @throws Exception
-     */
-    private void addCompilerPluginOptions(JavaMainCaller scalac) throws Exception {
-        for (String plugin : getCompilerPlugins()) {
-            scalac.addArgs("-Xplugin:" + plugin);
-        }
-    }
-    /**
-     * Retrieves a list of paths to scala compiler plugins.
-     *
-     * @return The list of plugins
-     * @throws Exception
-     */
-    private Set<String> getCompilerPlugins() throws Exception {
-        Set<String> plugins = new HashSet<String>();
+    /** Retrieves path information of scala compiler plugins. */
+    private ScalaPluginInfo getCompilerPluginInfo() throws Exception {
         if (compilerPlugins != null) {
             Set<String> ignoreClasspath = new HashSet<String>();
             addToClasspath(SCALA_GROUPID, "scala-compiler", scalaVersion,
                     ignoreClasspath);
             addToClasspath(SCALA_GROUPID, SCALA_LIBRARY_ARTIFACTID,
                     scalaVersion, ignoreClasspath);
+            Set<String> plugin_jars = new HashSet<String>();
+            Set<String> dependency_jars = new HashSet<String>();
             for (BasicArtifact artifact : compilerPlugins) {
-                System.out.println("compiler plugin: " + artifact.toString());
                 // TODO - Ensure proper scala version for plugins
-                Set<String> pluginClassPath = new HashSet<String>();
-                //TODO - Pull in transitive dependencies.
-                addToClasspath(artifact.groupId, artifact.artifactId, artifact.version, pluginClassPath, false);
-                pluginClassPath.removeAll(ignoreClasspath);
-                plugins.addAll(pluginClassPath);
+                addToClasspath(artifact.groupId, artifact.artifactId,
+                        artifact.version, plugin_jars, dependency_jars);
             }
+            return new ScalaPluginInfo(plugin_jars, dependency_jars, ignoreClasspath);
+        } else {
+            return new ScalaPluginInfo();
         }
-        return plugins;
     }
-
-
 }
